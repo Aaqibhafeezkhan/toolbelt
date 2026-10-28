@@ -16,6 +16,13 @@ const VARIANT_LABELS = {
   future: "Future (reserved)",
 } as const;
 
+function compareUuidBytes(a: Uint8Array, b: Uint8Array): number {
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
 function InspectionResult({ result }: { result: UuidInspection }) {
   if (!result.ok) {
     return (
@@ -94,6 +101,7 @@ export function UuidGeneratorClient() {
         const random = crypto.getRandomValues(new Uint8Array(16));
         return version === "v4" ? uuidV4(random) : uuidV7(Date.now(), random);
       });
+      if (version === "v7") uuids.sort(compareUuidBytes);
       setGenerated(uuids);
       setGenerationError("");
     } catch (error) {
