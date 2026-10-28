@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CopyButton } from "@/components/shared/CopyButton";
 import { formatTimestamp, relativeTime } from "@/lib/jwt-utils";
 import { detectUnit, fromEpoch, toEpoch, type TimestampUnit } from "@/lib/time-utils";
+import { TimeDifference } from "./TimeDifference";
 
 const UNIT_OPTIONS: { value: TimestampUnit; label: string }[] = [
   { value: "s", label: "Seconds" },
@@ -125,6 +126,7 @@ export function TimestampConverterClient() {
           <p className="text-xs text-[var(--fg-muted)]">For reliable results, include a timezone such as Z or an explicit UTC offset.</p>
         </section>
       </div>
+      <TimeDifference />
     </div>
   );
 }
