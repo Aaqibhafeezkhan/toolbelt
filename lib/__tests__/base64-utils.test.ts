@@ -64,7 +64,7 @@ describe("text round-trip", () => {
     const result = base64ToBytes("!");
     expect(result).toEqual({
       ok: false,
-      error: 'Invalid base64 string: illegal character "!" at position 1 (line 1, column 1)',
+      error: expect.stringMatching(/illegal character "!" at position 1 \(line 1, column 1\)/),
     });
     expect(decodeText("!")).toEqual(result);
   });
@@ -72,14 +72,80 @@ describe("text round-trip", () => {
   it("reports illegal characters at their original position after spaces", () => {
     expect(base64ToBytes("SGVs bG8!")).toEqual({
       ok: false,
-      error: 'Invalid base64 string: illegal character "!" at position 9 (line 1, column 9)',
+      error: expect.stringMatching(/illegal character "!" at position 9 \(line 1, column 9\)/),
     });
   });
 
   it("reports the original position, line, and column for multiline input", () => {
     expect(base64ToBytes("SGVs\nbG8!")).toEqual({
       ok: false,
-      error: 'Invalid base64 string: illegal character "!" at position 9 (line 2, column 4)',
+      error: expect.stringMatching(/illegal character "!" at position 9 \(line 2, column 4\)/),
+    });
+  });
+
+  it("reports illegal characters with accepted alphabet guidance", () => {
+    const result = base64ToBytes("SGV!bG8=");
+    expect(result).toEqual({
+      ok: false,
+      error: expect.stringMatching(/illegal character "!" at position 4.*standard.*URL-safe/),
+    });
+  });
+
+  it("maps payload errors back to their original data URI positions", () => {
+    const originalInput = "  data:text/plain;charset=utf-8;base64,SGV!bG8=";
+    const payload = "SGV!bG8=";
+    const result = base64ToBytes(payload, {
+      originalInput,
+      inputOffset: originalInput.indexOf(payload),
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.stringContaining(`position ${originalInput.indexOf("!") + 1}`),
+    });
+  });
+
+  it("distinguishes padding in the middle, too much padding, and mismatched padding", () => {
+    expect(base64ToBytes("SGV=sbG8=")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/padding may only appear at the end.*position 5/),
+    });
+    expect(base64ToBytes("SGVsbG8===")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/more than two.*position 10/),
+    });
+    expect(base64ToBytes("SGVs=")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/Invalid base64 padding:.*expected.*found 1/),
+    });
+  });
+
+  it("rejects impossible lengths while continuing to accept unpadded input", () => {
+    expect(base64ToBytes("A")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/Invalid base64 length.*position 1/),
+    });
+    expect(base64ToBytes("SGVsbG8")).toEqual({ ok: true, value: new TextEncoder().encode("Hello") });
+  });
+
+  it("accepts standard, URL-safe, and mixed alphabet input", () => {
+    const expected = { ok: true, value: new Uint8Array([0xfb, 0xff]) };
+    expect(base64ToBytes("+/8=")).toEqual(expected);
+    expect(base64ToBytes("-_8")).toEqual(expected);
+    expect(base64ToBytes("+_8")).toEqual(expected);
+  });
+
+  it("gives the issue's malformed examples distinct padding and length errors", () => {
+    expect(base64ToBytes("SG=Vsbw==")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/padding may only appear at the end.*position 4/),
+    });
+    expect(base64ToBytes("SGVsbG8===")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/more than two.*position 10/),
+    });
+    expect(base64ToBytes("SGVsb")).toEqual({
+      ok: false,
+      error: expect.stringMatching(/Invalid base64 length.*position 5/),
     });
   });
 

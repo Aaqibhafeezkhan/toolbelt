@@ -220,6 +220,11 @@ export function TextTab() {
           </select>
         </label>
       </div>
+      {direction === "decode" && (
+        <p className="text-[12px] text-[var(--fg-muted)]">
+          Decoding accepts standard and URL-safe characters, including mixed alphabets.
+        </p>
+      )}
 
       {/* Info bar */}
       {(input || output) && (

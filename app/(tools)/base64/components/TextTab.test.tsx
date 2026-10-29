@@ -97,6 +97,33 @@ describe("TextTab switches", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/Invalid base64/i);
   });
 
+  it("decodes both alphabets regardless of the selected encoding variant", async () => {
+    renderTab();
+    fireEvent.click(screen.getByRole("button", { name: "Base64 → Text" }));
+    const input = screen.getByRole("textbox", { name: "Base64 to decode" });
+    expect(screen.getByText(/Decoding accepts standard and URL-safe characters, including mixed alphabets/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "URL-safe" }));
+    fireEvent.change(input, { target: { value: "SGVsbG8=" } });
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Standard" }));
+    fireEvent.change(input, { target: { value: "8J-YgA" } });
+    expect(await screen.findByText("😀")).toBeInTheDocument();
+  });
+
+  it("clears a previous decoded result after invalid input", async () => {
+    renderTab();
+    fireEvent.click(screen.getByRole("button", { name: "Base64 → Text" }));
+    const input = screen.getByRole("textbox", { name: "Base64 to decode" });
+    fireEvent.change(input, { target: { value: "SGVsbG8=" } });
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "SGVs=" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Invalid base64 padding/);
+    expect(screen.queryByText("Hello")).not.toBeInTheDocument();
+  });
+
   it("swaps a valid conversion result", async () => {
     renderTab();
     fireEvent.change(screen.getByRole("textbox", { name: "Text to encode" }), {
