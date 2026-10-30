@@ -2,10 +2,44 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ColorConverterClient } from "./ColorConverterClient";
 import { contrastRatio, parseColor } from "@/lib/color-utils";
+import { useRegisterCommands } from "@/components/shared/CommandPalette";
+
+const { push } = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock("@/components/shared/CommandPalette", () => ({ useRegisterCommands: vi.fn() }));
-vi.mock("@/components/shared/Toast", () => ({ useToast: () => ({ push: vi.fn() }) }));
+vi.mock("@/components/shared/Toast", () => ({ useToast: () => ({ push }) }));
 afterEach(cleanup);
+
+describe("palette clipboard feedback", () => {
+  it.each([
+    ["hex", "#ff0000"],
+    ["rgb", "rgb(255, 0, 0)"],
+    ["hsl", "hsl(0, 100%, 50%)"],
+  ])("reports %s copy results with the correct value", async (format, expected) => {
+    push.mockClear();
+    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard denied"));
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      render(<ColorConverterClient />);
+      fireEvent.change(screen.getByLabelText("Color input"), { target: { value: "#ff0000" } });
+      const commands = vi.mocked(useRegisterCommands).mock.calls.at(-1)![1];
+      const command = commands.find(({ id }) => id === `color:copy-${format}`)!;
+      await expect(command.run()).resolves.toBeUndefined();
+      expect(writeText).toHaveBeenCalledOnce();
+      expect(writeText).toHaveBeenCalledWith(expected);
+      expect(push).toHaveBeenCalledExactlyOnceWith("Could not copy — clipboard blocked", "error");
+      push.mockClear();
+      writeText.mockReset().mockResolvedValue(undefined);
+      await command.run();
+      expect(writeText).toHaveBeenCalledExactlyOnceWith(expected);
+      expect(push).toHaveBeenCalledExactlyOnceWith(`Copied ${format.toUpperCase()} to clipboard`, "success");
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+});
 
 function failingPair() {
   render(<ColorConverterClient />);
