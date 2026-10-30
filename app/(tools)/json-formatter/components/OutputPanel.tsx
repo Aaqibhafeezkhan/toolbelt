@@ -4,7 +4,9 @@ import { useMemo, useState } from "react";
 import { parse, LosslessNumber } from "lossless-json";
 import { ChevronDown, ChevronRight, List, TreePine, FoldVertical, UnfoldVertical } from "lucide-react";
 import { tokenize } from "@/lib/json-utils";
+import { buildJsonTreePath, type JsonPathSegment } from "@/lib/json-tree-path";
 import { cn } from "@/lib/cn";
+import { CopyButton } from "@/components/shared/CopyButton";
 
 interface OutputPanelProps {
   output: string;
@@ -56,6 +58,7 @@ export function OutputPanel({ output, theme = "dark" }: OutputPanelProps) {
                   setTreeVersion((v) => v + 1);
                 }}
                 title="Expand all"
+                aria-label="Expand all"
               >
                 <UnfoldVertical className="w-3 h-3" />
                 Expand
@@ -68,6 +71,7 @@ export function OutputPanel({ output, theme = "dark" }: OutputPanelProps) {
                   setTreeVersion((v) => v + 1);
                 }}
                 title="Collapse all"
+                aria-label="Collapse all"
               >
                 <FoldVertical className="w-3 h-3" />
                 Collapse
@@ -150,6 +154,11 @@ function CodeView({ output, theme }: { output: string; theme: "dark" | "light" }
 
 /* Tree view */
 export function TreeView({ output, forceOpen }: { output: string; forceOpen: boolean | null }) {
+  return <TreeViewContent key={output} output={output} forceOpen={forceOpen} />;
+}
+
+function TreeViewContent({ output, forceOpen }: { output: string; forceOpen: boolean | null }) {
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const data = useMemo(() => {
     try {
       return { ok: true, value: parse(output) } as const;
@@ -162,7 +171,35 @@ export function TreeView({ output, forceOpen }: { output: string; forceOpen: boo
   }
   return (
     <div className="p-3 font-mono text-[13px] leading-[1.65]">
-      <TreeNode value={data.value} name={null} depth={0} isLast forceOpen={forceOpen} />
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-[var(--hairline)] bg-[var(--bg-card)] px-3 py-2">
+        <span className="text-[var(--fg-muted)]">JSON path</span>
+        <output
+          className={cn(
+            "min-w-0 flex-1 break-all",
+            selectedPath ? "text-[var(--fg)]" : "text-[var(--fg-dim)]"
+          )}
+          aria-label="Selected JSON path"
+        >
+          {selectedPath ?? "Select a value in the tree"}
+        </output>
+        <CopyButton
+          value={selectedPath ?? ""}
+          label="Copy JSON path"
+          ariaLabel="Copy JSON path"
+          disabled={!selectedPath}
+          className="!py-1 !text-[11px]"
+        />
+      </div>
+      <TreeNode
+        value={data.value}
+        name={null}
+        path={[]}
+        selectedPath={selectedPath}
+        onSelect={setSelectedPath}
+        depth={0}
+        isLast
+        forceOpen={forceOpen}
+      />
     </div>
   );
 }
@@ -170,12 +207,20 @@ export function TreeView({ output, forceOpen }: { output: string; forceOpen: boo
 function TreeNode({
   value,
   name,
+  index,
+  path,
+  selectedPath,
+  onSelect,
   depth,
   isLast,
   forceOpen,
 }: {
   value: unknown;
   name: string | null;
+  index?: number;
+  path: JsonPathSegment[];
+  selectedPath: string | null;
+  onSelect: (path: string) => void;
   depth: number;
   isLast: boolean;
   forceOpen: boolean | null;
@@ -191,6 +236,12 @@ function TreeNode({
     ? (value as unknown[]).map((v, i) => [String(i), v] as const)
     : [];
   const count = entries.length;
+  const jsonPath = buildJsonTreePath(path);
+  const isSelected = selectedPath === jsonPath;
+  const selectButtonClass = cn(
+    "rounded px-1 -mx-1 text-left transition-colors hover:bg-[var(--bg-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cyan)]",
+    isSelected && "bg-[var(--bg-card)] ring-1 ring-inset ring-[var(--cyan)]"
+  );
 
   const key =
     name !== null ? (
@@ -204,11 +255,16 @@ function TreeNode({
     return (
       <div style={{ paddingLeft: depth * 18 }} className="flex items-start">
         <span className="w-4 shrink-0" />
-        <span>
+        <button
+          type="button"
+          className={selectButtonClass}
+          onClick={() => onSelect(jsonPath)}
+          aria-pressed={isSelected}
+        >
           {key}
           <ValueToken value={value} />
-          {!isLast && <span className="tok-punct">,</span>}
-        </span>
+        </button>
+        {!isLast && <span className="tok-punct">,</span>}
       </div>
     );
   }
@@ -220,11 +276,17 @@ function TreeNode({
           type="button"
           onClick={() => setOpen((v) => !v)}
           className="w-4 h-[1.65em] shrink-0 flex items-center text-[var(--fg-dim)] hover:text-[var(--fg)] transition-colors"
-          aria-label={open ? "Collapse" : "Expand"}
+          aria-label={name ?? (depth === 0 ? "root" : `item ${index}`)}
+          aria-expanded={open}
         >
           {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
         </button>
-        <span>
+        <button
+          type="button"
+          className={selectButtonClass}
+          onClick={() => onSelect(jsonPath)}
+          aria-pressed={isSelected}
+        >
           {key}
           <span className="tok-brace">{isArr ? "[" : "{"}</span>
           {!open && (
@@ -234,7 +296,7 @@ function TreeNode({
           )}
           {!open && <span className="tok-brace">{isArr ? "]" : "}"}</span>}
           {!open && !isLast && <span className="tok-punct">,</span>}
-        </span>
+        </button>
       </div>
       {open && (
         <>
@@ -252,6 +314,13 @@ function TreeNode({
               <TreeNode
                 key={k}
                 name={isArr ? null : k}
+                index={isArr ? i : undefined}
+                path={[
+                  ...path,
+                  isArr ? { type: "index", index: i } : { type: "property", key: k },
+                ]}
+                selectedPath={selectedPath}
+                onSelect={onSelect}
                 value={v}
                 depth={depth + 1}
                 isLast={i === entries.length - 1}

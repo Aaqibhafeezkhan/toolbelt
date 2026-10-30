@@ -91,41 +91,84 @@ export function validate(raw: string): Result<true> {
   return { ok: true, value: true };
 }
 
+// Re-emit already-validated JSON, changing only the whitespace between tokens.
+// Parsing into an object would move integer-like keys ("2024", "10") to the
+// front, so keys, strings and numbers are copied through exactly as typed.
+function reindent(raw: string, indent: number): string {
+  const isSpace = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\r";
+  let out = "";
+  let depth = 0;
+  const newline = () => (indent ? "\n" + " ".repeat(indent * depth) : "");
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '"') {
+      const start = i;
+      for (i++; raw[i] !== '"'; i++) if (raw[i] === "\\") i++;
+      out += raw.slice(start, i + 1);
+    } else if (c === "{" || c === "[") {
+      let j = i + 1;
+      while (isSpace(raw[j])) j++;
+      if (raw[j] === "}" || raw[j] === "]") {
+        out += c + raw[j];
+        i = j;
+      } else {
+        depth++;
+        out += c + newline();
+      }
+    } else if (c === "}" || c === "]") {
+      depth--;
+      out += newline() + c;
+    } else if (c === ",") {
+      out += c + newline();
+    } else if (c === ":") {
+      out += indent ? ": " : ":";
+    } else if (!isSpace(c)) {
+      out += c;
+    }
+  }
+  return out;
+}
+
 export function format(raw: string, indent: 2 | 4 = 2): Result<string> {
   const v = validate(raw);
   if (!v.ok) return v;
-  // Lossless parse/stringify so large integers and high-precision decimals are
-  // preserved exactly rather than coerced through IEEE-754 doubles.
-  try {
-    return { ok: true, value: llStringify(llParse(raw), null, indent) as string };
-  } catch (e) {
-    return { ok: false, error: parseSyntaxError(raw, e) };
-  }
+  return { ok: true, value: reindent(raw, indent) };
 }
 
 export function minify(raw: string): Result<string> {
   const v = validate(raw);
   if (!v.ok) return v;
-  try {
-    return { ok: true, value: llStringify(llParse(raw)) as string };
-  } catch (e) {
-    return { ok: false, error: parseSyntaxError(raw, e) };
-  }
+  return { ok: true, value: reindent(raw, 0) };
 }
 
 function suggestFix(raw: string): string | undefined {
   if (!raw.trim()) return undefined;
-  if (/,\s*[\]}]/.test(raw)) return "Trailing comma detected — JSON doesn't allow commas before } or ].";
-  if (/[{,]\s*['"]?[A-Za-z_$][\w$]*['"]?\s*:/.test(raw) && /[{,]\s*[A-Za-z_$][\w$]*\s*:/.test(raw))
+  let diagnosticText = "";
+  let inString = false;
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw[i];
+    if (inString) {
+      if (char === "\\") i++; // Skip escaped quotes and backslashes with their following character.
+      else if (char === '"') {
+        diagnosticText += char;
+        inString = false;
+      }
+    } else {
+      diagnosticText += char;
+      if (char === '"') inString = true;
+    }
+  }
+  if (/,\s*[\]}]/.test(diagnosticText)) return "Trailing comma detected — JSON doesn't allow commas before } or ].";
+  if (/[{,]\s*['"]?[A-Za-z_$][\w$]*['"]?\s*:/.test(diagnosticText) && /[{,]\s*[A-Za-z_$][\w$]*\s*:/.test(diagnosticText))
     return "Object keys must be wrapped in double quotes (e.g. \"key\": value).";
-  if (/'[^']*'\s*[:,}\]]/.test(raw)) return "Strings must use double quotes, not single quotes.";
-  if (/\/\/|\/\*/.test(raw)) return "JSON doesn't support comments — remove // or /* */ segments.";
-  if (/\bundefined\b/.test(raw)) return "JSON has no `undefined` — use null instead.";
-  const openCurly = (raw.match(/{/g) || []).length;
-  const closeCurly = (raw.match(/}/g) || []).length;
+  if (/'[^']*'\s*[:,}\]]/.test(diagnosticText)) return "Strings must use double quotes, not single quotes.";
+  if (/\/\/|\/\*/.test(diagnosticText)) return "JSON doesn't support comments — remove // or /* */ segments.";
+  if (/\bundefined\b/.test(diagnosticText)) return "JSON has no `undefined` — use null instead.";
+  const openCurly = (diagnosticText.match(/{/g) || []).length;
+  const closeCurly = (diagnosticText.match(/}/g) || []).length;
   if (openCurly !== closeCurly) return `Unbalanced braces — ${openCurly} "{" vs ${closeCurly} "}".`;
-  const openBr = (raw.match(/\[/g) || []).length;
-  const closeBr = (raw.match(/\]/g) || []).length;
+  const openBr = (diagnosticText.match(/\[/g) || []).length;
+  const closeBr = (diagnosticText.match(/\]/g) || []).length;
   if (openBr !== closeBr) return `Unbalanced brackets — ${openBr} "[" vs ${closeBr} "]".`;
   return undefined;
 }
@@ -363,14 +406,24 @@ function needsQuote(s: string): boolean {
   if (/^[+-]?\.(inf|nan)$/i.test(s)) return true;
   if (/^\d{4}-\d{1,2}-\d{1,2}(?:[Tt ].*)?$/.test(s)) return true;
   if (/[:#]\s|\s#/.test(s)) return true;
-  if (/[\n\t\r"]/.test(s)) return true;
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff"]/.test(s)) return true;
   return false;
 }
 
-
 function yamlString(s: string): string {
   if (!needsQuote(s)) return s;
-  const escaped = s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r");
+  const escaped = s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t")
+    .replace(/\r/g, "\\r")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]/g, (c) => {
+      const code = c.charCodeAt(0);
+      return code < 0x100
+        ? `\\x${code.toString(16).toUpperCase().padStart(2, "0")}`
+        : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
+    });
   return `"${escaped}"`;
 }
 
@@ -527,10 +580,11 @@ export function sortKeys(raw: string, indent: 2 | 4 = 2): Result<string> {
   function walk(node: unknown): unknown {
     if (Array.isArray(node)) return node.map(walk);
     if (isContainer(node)) {
-      const keys = Object.keys(node as Record<string, unknown>).sort();
-      const out: Record<string, unknown> = {};
-      for (const k of keys) out[k] = walk((node as Record<string, unknown>)[k]);
-      return out;
+      const record = node as Record<string, unknown>;
+      const entries = Object.keys(record)
+        .sort()
+        .map((k) => [k, walk(record[k])] as [string, unknown]);
+      return Object.fromEntries(entries);
     }
     return node;
   }
@@ -591,8 +645,23 @@ function escapeXml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    // A parser turns a raw CR or CRLF into LF, but it keeps a character reference.
+    .replace(/\r/g, "&#13;");
 }
+
+// XML 1.0 has no way to hold these, not even as a character reference (&#7; is
+// rejected too): U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF.
+// Tab, LF and CR are allowed, and astral characters are surrogate pairs here,
+// which none of these ranges touch.
+const XML_FORBIDDEN_CHAR = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/;
+
+function forbiddenXmlChar(s: string): string | null {
+  const m = XML_FORBIDDEN_CHAR.exec(s);
+  return m ? `U+${m[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}` : null;
+}
+
+class XmlCharError extends Error {}
 function sanitizeTag(s: string): string {
   if (!s) return "item";
   const cleaned = s.replace(/[^A-Za-z0-9_.-]/g, "_");
@@ -603,11 +672,13 @@ export function toXML(raw: string, rootTag = "root"): Result<string> {
   const v = validate(raw);
   if (!v.ok) return v;
   const parsed = llParse(raw);
+  // `path` is the JSON path of the node (undefined at the top), used in errors.
   function render(
     node: unknown,
     tag: string,
     indent: number,
     parent: "root" | "object" | "array" = "root",
+    path?: string,
   ): string {
     const pad = "  ".repeat(indent);
     if (node === null) return `${pad}<${tag} nil="true"/>`;
@@ -619,11 +690,11 @@ export function toXML(raw: string, rootTag = "root"): Result<string> {
       if (node.length === 0) return `${pad}<${tag}/>`;
       if (parent === "object") {
         return node
-          .map((item) => render(item, itemTag, indent, "array"))
+          .map((item, i) => render(item, itemTag, indent, "array", `${path ?? ""}[${i}]`))
           .join("\n");
       }
       const inner = node
-        .map((item) => render(item, itemTag, indent + 1, "array"))
+        .map((item, i) => render(item, itemTag, indent + 1, "array", `${path ?? ""}[${i}]`))
         .join("\n");
       return `${pad}<${tag}>\n${inner}\n${pad}</${tag}>`;
     }
@@ -631,14 +702,30 @@ export function toXML(raw: string, rootTag = "root"): Result<string> {
       const entries = Object.entries(node as Record<string, unknown>);
       if (entries.length === 0) return `${pad}<${tag}/>`;
       const inner = entries
-        .map(([k, v]) => render(v, sanitizeTag(k), indent + 1, "object"))
+        .map(([k, v]) => render(v, sanitizeTag(k), indent + 1, "object", path === undefined ? k : `${path}.${k}`))
         .join("\n");
       return `${pad}<${tag}>\n${inner}\n${pad}</${tag}>`;
     }
-    return `${pad}<${tag}>${escapeXml(String(node))}</${tag}>`;
+    const text = String(node);
+    const bad = forbiddenXmlChar(text);
+    if (bad) {
+      const where = path === undefined ? "the top-level string" : `the string at ${JSON.stringify(path)}`;
+      throw new XmlCharError(
+        `Cannot convert to XML: ${where} contains ${bad}, which XML 1.0 cannot hold, not even as a character reference. Remove it, or use another format.`,
+      );
+    }
+    return `${pad}<${tag}>${escapeXml(text)}</${tag}>`;
   }
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n${render(parsed, sanitizeTag(rootTag), 0)}`;
-  return { ok: true, value: xml };
+  let body: string;
+  try {
+    body = render(parsed, sanitizeTag(rootTag), 0);
+  } catch (e) {
+    if (e instanceof XmlCharError) {
+      return { ok: false, error: { message: e.message, line: 1, column: 1, position: 0 } };
+    }
+    throw e;
+  }
+  return { ok: true, value: `<?xml version="1.0" encoding="UTF-8"?>\n${body}` };
 }
 
 /* ------- JSON -> Query string ------- */
@@ -705,7 +792,7 @@ export function escapeForCode(raw: string, lang: EscapeLang): string {
       // Escape backticks and template literal expressions for safety in template strings
       return "`" + minified.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${") + "`";
     case "python":
-      return "'''" + minified.replace(/\\/g, "\\\\").replace(/'''/g, "'\\''") + "'''";
+      return "'''" + minified.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'''";
     case "go":
       return "`" + minified.replace(/`/g, "` + \"`\" + `") + "`";
     case "rust":

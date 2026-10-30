@@ -27,7 +27,10 @@ export function DecodeTab() {
 
   const result = useMemo(() => {
     if (!effectiveInput.trim()) return null;
-    const r = base64ToBytes(effectiveInput);
+    const inputOffset = autoStripped
+      ? input.length - input.trimStart().length + autoStripped.prefix.length
+      : 0;
+    const r = base64ToBytes(effectiveInput, { originalInput: input, inputOffset });
     if (!r.ok) return { ok: false as const, error: r.error };
     const bytes = r.value;
     let mime = getMimeFromMagicBytes(bytes);
@@ -56,7 +59,7 @@ export function DecodeTab() {
         return null;
       })(),
     };
-  }, [effectiveInput, autoStripped]);
+  }, [effectiveInput, autoStripped, input]);
 
   function download() {
     if (!result?.ok) return;
@@ -104,6 +107,7 @@ export function DecodeTab() {
               <button
                 className={cn("btn", showHex && "bg-white/[0.06] border-[var(--hairline-strong)]")}
                 onClick={() => setShowHex((v) => !v)}
+                aria-pressed={showHex}
               >
                 <Eye className="w-3.5 h-3.5" />
                 <span>Hex</span>
@@ -129,7 +133,7 @@ export function DecodeTab() {
             </div>
           )}
           {result && !result.ok && (
-            <div className="flex items-start gap-2 text-[var(--rose)] text-[13px]">
+            <div role="alert" className="flex items-start gap-2 text-[var(--rose)] text-[13px]">
               <AlertCircle className="w-4 h-4 mt-0.5" />
               <span>{result.error}</span>
             </div>

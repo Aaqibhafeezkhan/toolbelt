@@ -12,6 +12,7 @@ import {
   parseJson5Compat,
   diffLines,
   validate,
+  SAMPLE_JSON,
 } from "../json-utils";
 
 const BIG = '{"id":12345678901234567890,"pi":3.141592653589793238,"n":42}';
@@ -73,6 +74,31 @@ describe("JSON Formatter Error Locations", () => {
   });
 });
 
+describe("JSON Formatter suggestions", () => {
+  it.each([
+    ['{"url": "https://example.com" "id": 1}', "a URL containing //"],
+    ['{"a": "{", "b" 1}', "a brace inside a string"],
+    ['{"note": "value is undefined" "x": 1}', "undefined inside a string"],
+    [String.raw`{"note": "say \"// undefined { [" "x": 1}`, "an escaped quote before diagnostic text"],
+    [String.raw`{"note": "path \\ // undefined { [" "x": 1}`, "an escaped backslash before diagnostic text"],
+    ['"https://example.com', "an unterminated string"],
+  ])("does not suggest a string's contents for %s (%s)", (input) => {
+    const result = validate(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.suggestion).toBeUndefined();
+  });
+
+  it.each([
+    ['{"a": 1 // comment\n}', "comments"],
+    ['{"a": undefined}', "undefined"],
+    ['{"a": 1', "Unbalanced braces"],
+  ])("preserves the relevant suggestion for %s", (input, suggestion) => {
+    const result = validate(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.suggestion).toContain(suggestion);
+  });
+});
+
 describe("lossless numbers", () => {
   it("preserves large integers and long decimals when formatting", () => {
     const r = format(BIG, 2);
@@ -107,6 +133,47 @@ describe("lossless numbers", () => {
   it("infers number type for big values in TypeScript output", () => {
     const ts = toTypeScript(BIG);
     expect(ts.ok && /id\??: number/.test(ts.value)).toBe(true);
+  });
+});
+
+describe("format and minify keep the input's key order", () => {
+  it("does not move integer-like keys to the top", () => {
+    const min = minify('{"name":"x","2024":10,"2023":5}');
+    expect(min.ok && min.value).toBe('{"name":"x","2024":10,"2023":5}');
+
+    const formatted = format('{"id":"a","10":1,"9":2}');
+    expect(formatted.ok && formatted.value).toBe('{\n  "id": "a",\n  "10": 1,\n  "9": 2\n}');
+
+    const nested = format('{"z":1,"nested":{"b":1,"1":2}}');
+    expect(nested.ok && nested.value).toBe(
+      '{\n  "z": 1,\n  "nested": {\n    "b": 1,\n    "1": 2\n  }\n}'
+    );
+  });
+
+  it("matches JSON.stringify layout when key order isn't affected", () => {
+    for (const indent of [2, 4] as const) {
+      const r = format(SAMPLE_JSON, indent);
+      expect(r.ok && r.value).toBe(JSON.stringify(JSON.parse(SAMPLE_JSON), null, indent));
+    }
+    const min = minify(SAMPLE_JSON);
+    expect(min.ok && min.value).toBe(JSON.stringify(JSON.parse(SAMPLE_JSON)));
+  });
+
+  it("keeps numbers, empty containers and string contents exactly", () => {
+    const input = '{ "a" : 1.0, "b" : { }, "c" : [\n], "d" : "x\\"{y}, [z]: \\\\", "e": [1e3, -0] }';
+    const min = minify(input);
+    expect(min.ok && min.value).toBe('{"a":1.0,"b":{},"c":[],"d":"x\\"{y}, [z]: \\\\","e":[1e3,-0]}');
+    const formatted = format(input);
+    expect(formatted.ok && formatted.value).toBe(
+      '{\n  "a": 1.0,\n  "b": {},\n  "c": [],\n  "d": "x\\"{y}, [z]: \\\\",\n  "e": [\n    1e3,\n    -0\n  ]\n}'
+    );
+  });
+
+  it("formats top-level primitives and still rejects invalid JSON", () => {
+    const r = format('  "hi"  ');
+    expect(r.ok && r.value).toBe('"hi"');
+    expect(format('{"a":1,}').ok).toBe(false);
+    expect(minify("").ok).toBe(false);
   });
 });
 
@@ -273,6 +340,91 @@ describe("toXML", () => {
 
     expect(result.value).toContain("  <my_tag>a</my_tag>\n  <my_tag>b</my_tag>");
   });
+
+  describe("characters XML 1.0 cannot hold", () => {
+    const xmlOf = (value: unknown) => toXML(JSON.stringify(value));
+
+    it("writes a carriage return as &#13; so a parser reads it back unchanged", () => {
+      const crlf = xmlOf({ note: "a\r\nb" });
+      expect(crlf.ok && crlf.value).toContain("<note>a&#13;\nb</note>");
+      const cr = xmlOf({ note: "a\rb" });
+      expect(cr.ok && cr.value).toContain("<note>a&#13;b</note>");
+    });
+
+    it("keeps tabs and line feeds as they are", () => {
+      const result = xmlOf({ note: "a\tb\nc" });
+      expect(result.ok && result.value).toContain("<note>a\tb\nc</note>");
+    });
+
+    it.each([
+      ["NUL", "\u0000", "U+0000"],
+      ["U+0008", "\u0008", "U+0008"],
+      ["BEL", "\u0007", "U+0007"],
+      ["vertical tab", "\u000b", "U+000B"],
+      ["form feed", "\u000c", "U+000C"],
+      ["U+000E", "\u000e", "U+000E"],
+      ["ESC", "\u001b", "U+001B"],
+      ["U+001F", "\u001f", "U+001F"],
+      ["U+FFFE", "\ufffe", "U+FFFE"],
+      ["U+FFFF", "\uffff", "U+FFFF"],
+    ])("gives an error naming %s and its key instead of XML that will not parse", (_name, char, code) => {
+      const result = xmlOf({ log: `red${char}text` });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.message).toContain(code);
+      expect(result.error.message).toContain('"log"');
+    });
+
+    it("names the path of a value that is nested in objects and arrays", () => {
+      const result = xmlOf({ users: [{ name: "Ada" }, { log: "\u001b[31mred" }] });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.message).toContain("U+001B");
+      expect(result.error.message).toContain('"users[1].log"');
+    });
+
+    it("reports a bad value at the top level and in an array of strings", () => {
+      const top = toXML(JSON.stringify("a\u0000b"));
+      expect(top.ok).toBe(false);
+      if (!top.ok) expect(top.error.message).toContain("U+0000");
+      const list = xmlOf({ tags: ["ok", "b\u0007d"] });
+      expect(list.ok).toBe(false);
+      if (!list.ok) expect(list.error.message).toContain('"tags[1]"');
+    });
+
+    it("reports the first bad value it meets", () => {
+      const result = xmlOf({ a: "\u0001", b: "\u0002" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toContain("U+0001");
+        expect(result.error.message).not.toContain("U+0002");
+      }
+    });
+
+    it("converts every character XML 1.0 does allow", () => {
+      const allowed = "\u0009\u000a\u000d\u0020\u007f\u0080\u009f\ud7ff\ue000\ufffd\u{10000}\u{1f600}\u{10ffff}";
+      const result = xmlOf({ ok: allowed });
+      expect(result.ok).toBe(true);
+    });
+
+    it("rejects exactly the characters outside the XML 1.0 Char production, across the whole BMP", () => {
+      // Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+      const allowedInXml = (cp: number) =>
+        cp === 0x9 || cp === 0xa || cp === 0xd || (cp >= 0x20 && cp <= 0xd7ff) || (cp >= 0xe000 && cp <= 0xfffd);
+      const wrong: string[] = [];
+      for (let cp = 0; cp <= 0xffff; cp++) {
+        if (cp >= 0xd800 && cp <= 0xdfff) continue; // lone surrogates are not valid JSON text to inspect here
+        const ok = xmlOf({ v: `x${String.fromCharCode(cp)}y` }).ok;
+        if (ok !== allowedInXml(cp)) wrong.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")}`);
+      }
+      expect(wrong).toEqual([]);
+    });
+
+    it("does not reject a bad character in a key, because keys are rewritten to safe tag names", () => {
+      const result = xmlOf({ "a\u0007b": 1 });
+      expect(result.ok && result.value).toContain("<a_b>1</a_b>");
+    });
+  });
 });
 
 describe("toYAML writes numbers with an exponent as YAML 1.1 floats", () => {
@@ -347,6 +499,12 @@ describe("escapeForCode python", () => {
     const out = escapeForCode(input, "python");
 
     expect(out).toBe("'''{\"path\":\"C:\\\\\\\\temp\"}'''");
+  });
+
+  it("escapes runs of single quotes", () => {
+    expect(escapeForCode('{"a":"\'\'\'\'\'"}', "python")).toBe("'''{\"a\":\"\\'\\'\\'\\'\\'\"}'''");
+    expect(escapeForCode('{"a":"\'\'\'\'\'\'\'\'"}', "python")).toBe("'''{\"a\":\"\\'\\'\\'\\'\\'\\'\\'\\'\"}'''");
+    expect(escapeForCode("it's'", "python")).toBe("'''it\\'s\\''''");
   });
 });
 
@@ -425,6 +583,66 @@ describe("toYAML quotes strings YAML would read as other types", () => {
       if (out.ok) expect(out.value).toBe(`a: ${input}\n`);
     },
   );
+});
+
+describe("toYAML escapes control characters", () => {
+  it("escapes SOH and bell characters", () => {
+    const out = toYAML('{"soh":"\\u0001","bell":"a\\u0007b"}');
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value).toContain('soh: "\\x01"');
+    expect(out.value).toContain('bell: "a\\x07b"');
+  });
+
+  it("escapes ANSI color codes", () => {
+    const out = toYAML('{"log":"\\u001b[31mred\\u001b[0m"}');
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value).toBe('log: "\\x1B[31mred\\x1B[0m"\n');
+  });
+
+  it("escapes boundary control characters and non-printable unicode", () => {
+    const input = JSON.stringify({
+      nullChar: "\u0000",
+      del: "\u007F",
+      pad: "\u0080",
+      nel: "\u0085",
+      apc: "\u009F",
+      ls: "\u2028",
+      ps: "\u2029",
+      nonChar: "\uFFFE",
+    });
+    const out = toYAML(input);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value).toContain('nullChar: "\\x00"');
+    expect(out.value).toContain('del: "\\x7F"');
+    expect(out.value).toContain('pad: "\\x80"');
+    expect(out.value).toContain('nel: "\\x85"');
+    expect(out.value).toContain('apc: "\\x9F"');
+    expect(out.value).toContain('ls: "\\u2028"');
+    expect(out.value).toContain('ps: "\\u2029"');
+    expect(out.value).toContain('nonChar: "\\uFFFE"');
+  });
+
+  it("escapes control characters in keys", () => {
+    const out = toYAML('{"a\\u0001b":1}');
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value).toBe('"a\\x01b": 1\n');
+  });
+
+  it("preserves standard whitespace escapes and normal strings", () => {
+    const out = toYAML('{"v":"x\\ty\\nz"}');
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value).toBe('v: "x\\ty\\nz"\n');
+
+    const normal = toYAML('{"v":"hello"}');
+    expect(normal.ok).toBe(true);
+    if (!normal.ok) return;
+    expect(normal.value).toBe("v: hello\n");
+  });
 });
 
 describe("toYAML empty array items", () => {
@@ -539,6 +757,162 @@ describe("toTypeScript array items", () => {
   });
 });
 
+/* -----------------------------------------------------------------------
+ * sortKeys — __proto__ key preservation (issue #279)
+ * All inputs are JSON strings; assertions parse the returned JSON string.
+ * We never use JS object literals with an unquoted __proto__ property because
+ * that triggers JS prototype semantics instead of testing the JSON key.
+ * ----------------------------------------------------------------------- */
+describe("sortKeys __proto__ preservation", () => {
+  // ── Test A: primitive __proto__ value ──────────────────────────────────
+  it("A: preserves __proto__ with a primitive value and does not replace the whole output", () => {
+    const input = '{"__proto__": 5, "z": 1}';
+    const result = sortKeys(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Must be valid JSON
+    const parsed = JSON.parse(result.value) as Record<string, unknown>;
+    expect(typeof parsed).toBe("object");
+    expect(parsed).not.toBeNull();
+
+    // __proto__ must be an own property
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+    expect(parsed["__proto__"]).toBe(5);
+    expect(parsed["z"]).toBe(1);
+
+    // Sorting must not replace the whole output with just the value 5
+    expect(result.value).not.toBe("5");
+  });
+
+  // ── Test B: object-valued __proto__ ────────────────────────────────────
+  it("B: preserves __proto__ with an object value without changing the prototype", () => {
+    const input = '{"__proto__": {"admin": true}, "b": 1, "a": 2}';
+    const result = sortKeys(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const parsed = JSON.parse(result.value) as Record<string, unknown>;
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+
+    // Nested admin property must survive
+    const proto = parsed["__proto__"] as Record<string, unknown>;
+    expect(proto).toBeTruthy();
+    expect(proto["admin"]).toBe(true);
+
+    // Ordinary keys are still present
+    expect(parsed["a"]).toBe(2);
+    expect(parsed["b"]).toBe(1);
+
+    // Parsed object's prototype must NOT be changed to the supplied __proto__ value
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+  });
+
+  // ── Test C: nested __proto__ ──────────────────────────────────────────
+  it("C: preserves nested __proto__ and sorts sibling keys alphabetically", () => {
+    const input = '{"outer": {"__proto__": 7, "z": 3, "a": 1}}';
+    const result = sortKeys(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const parsed = JSON.parse(result.value) as { outer: Record<string, unknown> };
+    const outer = parsed["outer"];
+    expect(Object.hasOwn(outer, "__proto__")).toBe(true);
+    expect(outer["__proto__"]).toBe(7);
+    expect(outer["a"]).toBe(1);
+    expect(outer["z"]).toBe(3);
+  });
+
+  // ── Test D: __proto__ inside an array ─────────────────────────────────
+  it("D: preserves __proto__ inside an array element", () => {
+    const input = '[{"__proto__": false, "z": 2, "a": 1}]';
+    const result = sortKeys(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const parsed = JSON.parse(result.value) as unknown[];
+    expect(Array.isArray(parsed)).toBe(true);
+    const elem = parsed[0] as Record<string, unknown>;
+    expect(typeof elem).toBe("object");
+    expect(Object.hasOwn(elem, "__proto__")).toBe(true);
+    expect(elem["__proto__"]).toBe(false);
+    expect(elem["a"]).toBe(1);
+    expect(elem["z"]).toBe(2);
+  });
+
+  // ── Test E: all JSON value types for __proto__ ─────────────────────────
+  it.each([
+    ["string",  '{"__proto__": "hello", "x": 1}',              "hello"],
+    ["number",  '{"__proto__": 42,      "x": 1}',              42    ],
+    ["boolean", '{"__proto__": true,    "x": 1}',              true  ],
+    ["null",    '{"__proto__": null,    "x": 1}',              null  ],
+    ["array",   '{"__proto__": [1,2],   "x": 1}',              null  ], // special-cased below
+    ["object",  '{"__proto__": {"k":9}, "x": 1}',              null  ], // special-cased below
+  ])("E: preserves __proto__ with a %s value through sort and round-trip", (kind, input, expected) => {
+    const result = sortKeys(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const parsed = JSON.parse(result.value) as Record<string, unknown>;
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+    if (kind === "array") {
+      expect(Array.isArray(parsed["__proto__"])).toBe(true);
+      expect((parsed["__proto__"] as unknown[])).toEqual([1, 2]);
+    } else if (kind === "object") {
+      expect(typeof parsed["__proto__"]).toBe("object");
+      expect((parsed["__proto__"] as Record<string, unknown>)["k"]).toBe(9);
+    } else {
+      expect(parsed["__proto__"]).toBe(expected);
+    }
+    expect(result.value).not.toBe(String(expected));
+  });
+
+  // ── Test F: ordinary objects still sort alphabetically ─────────────────
+  it("F: ordinary objects still sort alphabetically, including nested and array-embedded", () => {
+    const input = '{"z": 3, "a": 1, "m": {"y": 9, "b": 2}, "list": [{"q": 0, "c": 7}]}';
+    const result = sortKeys(input, 2);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const parsed = JSON.parse(result.value) as Record<string, unknown>;
+    const keys = Object.keys(parsed);
+    expect(keys).toEqual([...keys].sort());
+    const m = parsed["m"] as Record<string, unknown>;
+    expect(Object.keys(m)).toEqual([...Object.keys(m)].sort());
+  });
+
+  // ── Test G: invalid JSON still returns error result ────────────────────
+  it("G: invalid JSON returns an error Result instead of throwing", () => {
+    const result = sortKeys('{"bad": }');
+    expect(result.ok).toBe(false);
+  });
+
+  // ── Test H: both indentation modes work with __proto__ ─────────────────
+  it("H: indent=2 and indent=4 both preserve __proto__ correctly", () => {
+    const input = '{"__proto__": 5, "z": 1}';
+
+    const r2 = sortKeys(input, 2);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) {
+      const p2 = JSON.parse(r2.value) as Record<string, unknown>;
+      expect(Object.hasOwn(p2, "__proto__")).toBe(true);
+      expect(p2["__proto__"]).toBe(5);
+      // 2-space indentation
+      expect(r2.value).toContain("  ");
+    }
+
+    const r4 = sortKeys(input, 4);
+    expect(r4.ok).toBe(true);
+    if (r4.ok) {
+      const p4 = JSON.parse(r4.value) as Record<string, unknown>;
+      expect(Object.hasOwn(p4, "__proto__")).toBe(true);
+      expect(p4["__proto__"]).toBe(5);
+      // 4-space indentation
+      expect(r4.value).toContain("    ");
+    }
+  });
+});
+
 describe("duplicate keys", () => {
   const DUP = '{"a": 1, "a": 2}';
 
@@ -551,7 +925,7 @@ describe("duplicate keys", () => {
   });
 
   it("conversions surface a duplicate-key error instead of throwing", () => {
-    const results = [toCSV(DUP), toTypeScript(DUP), toYAML(DUP), toXML(DUP), sortKeys(DUP)];
+    const results = [format(DUP), minify(DUP), toCSV(DUP), toTypeScript(DUP), toYAML(DUP), toXML(DUP), sortKeys(DUP)];
     for (const result of results) {
       expect(result.ok).toBe(false);
       if (!result.ok) {

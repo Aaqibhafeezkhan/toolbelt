@@ -51,29 +51,45 @@ export function JsonFormatterClient() {
   const urlInputRef = useRef<HTMLInputElement>(null);
   const urlDialogRef = useRef<HTMLDivElement>(null);
   const fetchTriggerRef = useRef<HTMLButtonElement>(null);
+  const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { push } = useToast();
   const history = useHistory("json-formatter", 15);
+
+  useEffect(() => {
+    return () => {
+      if (pulseTimerRef.current) {
+        clearTimeout(pulseTimerRef.current);
+      }
+    };
+  }, []);
 
   const lineCount = input ? input.split("\n").length : 0;
 
   const doFormat = useCallback(
-    (silent = false) => {
-      if (!input.trim()) {
+    (text = input, silent = false) => {
+      if (!text.trim()) {
         setOutput("");
         setError(null);
         return;
       }
-      const r = json5 ? parseJson5Compat(input, indent) : format(input, indent);
+      const r = json5 ? parseJson5Compat(text, indent) : format(text, indent);
       if (r.ok) {
         setOutput(r.value);
         setError(null);
+        if (pulseTimerRef.current) {
+          clearTimeout(pulseTimerRef.current);
+        }
         setSuccessPulse(true);
-        setTimeout(() => setSuccessPulse(false), 500);
+        pulseTimerRef.current = setTimeout(() => {
+          setSuccessPulse(false);
+          pulseTimerRef.current = null;
+        }, 500);
         if (!silent) {
           push("Formatted ✓", "success");
-          history.push(input);
+          history.push(text);
         }
       } else {
+        setOutput("");
         setError(r.error);
         setErrorShake((n) => n + 1);
         if (!silent) push("Invalid JSON", "error");
@@ -143,10 +159,8 @@ export function JsonFormatterClient() {
   const handleLoadSample = useCallback(() => {
     setInput(SAMPLE_JSON);
     setError(null);
-    setTimeout(() => {
-      const r = format(SAMPLE_JSON, indent);
-      if (r.ok) setOutput(r.value);
-    }, 0);
+    const r = format(SAMPLE_JSON, indent);
+    if (r.ok) setOutput(r.value);
   }, [indent]);
 
   const handleFetchUrl = useCallback(async () => {
@@ -162,10 +176,7 @@ export function JsonFormatterClient() {
       setUrlDialog(false);
       setUrlInput("");
       push("Fetched and loaded", "success");
-      setTimeout(() => {
-        const r = format(text, indent);
-        if (r.ok) setOutput(r.value);
-      }, 0);
+      doFormat(text, true);
     } catch (e) {
       setUrlError(
         e instanceof TypeError
@@ -177,7 +188,7 @@ export function JsonFormatterClient() {
     } finally {
       setUrlLoading(false);
     }
-  }, [urlInput, indent, push]);
+  }, [urlInput, push, doFormat]);
 
   // URL dialog: focus the field on open, restore focus to the trigger on close.
   useEffect(() => {
@@ -240,13 +251,7 @@ export function JsonFormatterClient() {
       const text = await file.text();
       setInput(text);
       push(`Loaded ${file.name}`, "success");
-      const r = format(text, indent);
-      if (r.ok) {
-        setOutput(r.value);
-        setError(null);
-      } else {
-        setError(r.error);
-      }
+      doFormat(text, true);
     }
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("dragleave", onDragLeave);
@@ -256,7 +261,7 @@ export function JsonFormatterClient() {
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("drop", onDrop);
     };
-  }, [indent, push]);
+  }, [push, doFormat]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -470,11 +475,7 @@ export function JsonFormatterClient() {
             history={history}
             onSelect={(v) => {
               setInput(v);
-              const r = format(v, indent);
-              if (r.ok) {
-                setOutput(r.value);
-                setError(null);
-              }
+              doFormat(v, true);
             }}
             formatLabel={(item) => {
               const firstLine = item.value.replace(/\s+/g, " ").slice(0, 80);

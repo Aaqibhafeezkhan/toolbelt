@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitWords, toCase } from "@/lib/case-utils";
+import { detectWords, splitWords, toCase } from "@/lib/case-utils";
 
 describe("splitWords", () => {
   it("splits camelCase and PascalCase boundaries", () => {
@@ -28,6 +28,36 @@ describe("splitWords", () => {
 
   it("returns [] for empty input", () => {
     expect(splitWords("")).toEqual([]);
+  });
+});
+
+describe("detectWords", () => {
+  it("preserves casing while splitting identifiers", () => {
+    expect(detectWords("XMLHttpRequest")).toEqual([
+      { lineNumber: 1, words: ["XML", "Http", "Request"] },
+    ]);
+    expect(detectWords("user_id")).toEqual([
+      { lineNumber: 1, words: ["user", "id"] },
+    ]);
+    expect(detectWords("HTTP_status_code")).toEqual([
+      { lineNumber: 1, words: ["HTTP", "status", "code"] },
+    ]);
+  });
+
+  it("keeps the existing digit and Unicode boundary rules", () => {
+    expect(detectWords("version2Update")).toEqual([
+      { lineNumber: 1, words: ["version2", "Update"] },
+    ]);
+    expect(detectWords("ÄpfelBaum\n\nनमस्ते दुनिया")).toEqual([
+      { lineNumber: 1, words: ["Äpfel", "Baum"] },
+      { lineNumber: 3, words: ["नमस्ते", "दुनिया"] },
+    ]);
+  });
+
+  it("ignores repeated separators, whitespace, and empty lines", () => {
+    expect(detectWords("  user__id  \n\n  ")).toEqual([
+      { lineNumber: 1, words: ["user", "id"] },
+    ]);
   });
 });
 
@@ -93,5 +123,21 @@ describe("toCase", () => {
     expect(toCase("Hello, World!", "sentence")).toBe("Hello, world!");
     expect(toCase("Hello, World!", "lower")).toBe("hello, world!");
     expect(toCase("Hello, World!", "upper")).toBe("HELLO, WORLD!");
+  });
+
+  it("keeps . and / in the prose styles", () => {
+    expect(toCase("Hello. World.", "lower")).toBe("hello. world.");
+    expect(toCase("Hello. World.", "title")).toBe("Hello. World.");
+    expect(toCase("it's 3.5 km away", "lower")).toBe("it's 3.5 km away");
+    expect(toCase("Read the docs at example.com/start.", "lower")).toBe("read the docs at example.com/start.");
+    expect(toCase("Pick a/b, then stop", "upper")).toBe("PICK A/B, THEN STOP");
+  });
+
+  it("still splits _, - and case boundaries in the prose styles", () => {
+    expect(toCase("user_id", "title")).toBe("User Id");
+    expect(toCase("userId", "title")).toBe("User Id");
+    expect(toCase("kebab-case-name", "title")).toBe("Kebab Case Name");
+    expect(toCase("user.id", "camel")).toBe("userId");
+    expect(toCase("user/id", "snake")).toBe("user_id");
   });
 });
